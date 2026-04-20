@@ -1,13 +1,78 @@
 Rust + Windows Credential Provider 开发任务清单
 
 目标
-使用 Rust 实现认证核心，并将 Windows Credential Provider 层保持为薄桥接层。Credential Provider 只负责字段展示、输入采集、事件转发和提交对接；认证模式、状态机、输入校验、错误处理和后端调用统一放在 Rust 核心层。
+使用 Rust 实现认证核心，并将 Windows Credential Provider 层保持为薄桥接层。Credential Provider 负责字段展示、输入采集、事件转发和提交对接；认证模式、状态机、输入校验、错误处理和后端调用统一放在 Rust 核心层。
 
 总体原则
 1. 薄 UI 桥接层：COM 回调中不堆业务逻辑。
 2. 厚认证核心：认证状态、模式切换、输入校验、错误处理集中管理。
 3. 可测试：核心逻辑尽量不依赖 COM，优先支持单元测试。
-4. 可演进：先落地最小可用版本，再逐步接入验证码、二次密码、倒计时和真实认证服务。
+4. 分层演进：先做 mock 与桥接，再决定最终登录交接方案。
+
+当前关键结论
+1. 单靠 Credential Provider 不能在自定义认证成功后直接放行进入系统。
+2. 如果要完全不依赖 Windows 原生用户名/密码认证，最终需要自定义 LSA Authentication Package。
+3. 如果后端可以在认证成功后返回本机可用账户和密码，则可以把它们包装成 Windows 登录凭据交给 Winlogon。
+4. 第 3 条可行，但安全风险高，要求后端能够安全持有并下发本机账户密码，这通常只适合作为过渡方案。
+
+自定义 Authentication Package 方案草图
+
+方案 A：正统方案
+1. Credential Provider 采集验证码、二次密码、设备信息等自定义数据。
+2. `GetSerialization` 不再构造 `CredPackAuthenticationBufferW` 的用户名/密码缓冲，而是构造“自定义认证包可识别”的二进制序列化数据。
+3. `CSampleProvider.rs` 中不再调用 `retrieve_negotiate_auth_package()` 获取 `Negotiate` 包 ID，而是改成获取“自定义 Authentication Package”的包 ID。
+4. Winlogon 将序列化结果交给 LSA。
+5. 自定义 Authentication Package 解析数据、完成认证、生成系统接受的登录结果。
+
+方案 B：过渡方案
+1. Credential Provider 先完成验证码或二次密码校验。
+2. 校验成功后，后端返回“本机可登录账户 + 密码”。
+3. `GetSerialization` 使用现有 `CredPackAuthenticationBufferW` 路线，将这组账户密码打包成 Windows 可接受的登录凭据。
+4. Winlogon 继续走现有 Windows 认证链路。
+
+两种方案对比
+1. 方案 A
+   - 优点：架构正确，真正满足“自定义认证通过后放行”。
+   - 缺点：实现复杂，需要开发和注册自定义 LSA Authentication Package。
+2. 方案 B
+   - 优点：改造小，可以复用当前 `GetSerialization` 主体逻辑。
+   - 缺点：本质仍依赖 Windows 原生账户密码；后端保存或下发本机密码带来较大安全风险。
+
+对当前代码的具体影响
+
+`src/CSampleProvider.rs`
+1. 当前 `retrieve_negotiate_auth_package()` 获取的是 `Negotiate` 包 ID。
+2. 如果走方案 A：
+   - 需要替换为 `retrieve_custom_auth_package()`。
+   - 包名改为你们自定义 Authentication Package 的名称。
+3. 如果走方案 B：
+   - 可以保留“系统包”路线，但更合适的是明确使用 MSV1_0 或 Kerberos 对应的目标包，而不是继续模糊地使用 `Negotiate`。
+
+`src/CSampleCredential.rs`
+1. 当前 `GetSerialization()` 的核心逻辑是：
+   - 收集用户名/密码
+   - 使用 `CredPackAuthenticationBufferW`
+   - 返回 Windows 原生可识别的序列化凭据
+2. 如果走方案 A：
+   - 这段实现要被重写为“自定义序列化格式”。
+   - 不再使用 `CredPackAuthenticationBufferW`。
+3. 如果走方案 B：
+   - 这段实现可以保留总体结构。
+   - 但用户名/密码来源改成“自定义认证成功后由接口返回的本机账户密码”。
+
+关于“接口返回本机账户和密码，再构建 Windows 登录凭据”的可行性
+1. 技术上可行。
+2. 可行前提：
+   - 目标机器上确实存在该本机账户。
+   - 返回的密码是当前有效密码。
+   - 凭据能被当前目标认证包接受。
+3. 主要风险：
+   - 服务端或中间链路需要保存、传输、下发本机明文密码。
+   - 密码轮换、失效、缓存一致性都很麻烦。
+   - 一旦后端或传输被攻破，等于泄露本机登录口令。
+4. 结论：
+   - 可作为 PoC 或过渡方案。
+   - 不建议作为长期生产方案。
 
 阶段任务
 
@@ -54,26 +119,31 @@ Rust + Windows Credential Provider 开发任务清单
 - [x] 跑通双模式界面
 - [x] 完成 mock 验证码发送流程
 - [x] 完成 mock 验证码校验流程
-- [ ] 完成验证码模式的最终 Windows 凭据交接策略
-  说明：仅靠 Credential Provider 不能在自定义认证成功后直接放行进入系统；需要后续引入自定义 LSA Authentication Package，或在自定义认证成功后再安全地提供系统可接受的 Windows 凭据。
 - [x] 完成二次密码模式的提交联动
+- [x] 完成验证码倒计时、发码按钮禁用/恢复
 
-第六阶段：真实认证服务接入
-- [ ] 接入验证码发送接口
-- [ ] 接入验证码校验接口
-- [ ] 接入二次密码校验接口
-- [ ] 加入超时、重试、失败提示
-- [ ] 清理敏感信息在内存中的停留
+第六阶段：最终登录交接方案决策
+- [x] 评估“Credential Provider 直接放行”的不可行性
+- [x] 评估跨线程刷新 COM UI 的初步风险
+- [x] 完成自定义 Authentication Package 方案草图
+- [x] 评估“接口返回本机账户密码，再构建 Windows 凭据”的可行性
+- [ ] 选择最终路线：方案 A 或方案 B
 
-第七阶段：倒计时与异步处理
-- [x] 为验证码发送增加倒计时状态
-- [x] 增加发码按钮禁用/恢复逻辑
-- [x] 通过线程更新倒计时状态
-- [x] 将状态变化回传到 UI 刷新逻辑
-- [x] 完成跨线程访问 UI 相关 COM 对象的初步安全评估
-  结论：当前实现把 `ICredentialProviderCredentialEvents` 带入后台线程并直接调用刷新接口，适合作为 mock/原型验证，但生产环境应优先改为封送回创建该 COM 对象的线程，或改造成由 UI 线程轮询/拉取状态。
+第七阶段：如果选择方案 A
+- [ ] 定义自定义 Authentication Package 名称与序列化格式
+- [ ] 将 `retrieve_negotiate_auth_package()` 替换为 `retrieve_custom_auth_package()`
+- [ ] 重写 `GetSerialization()` 为自定义序列化实现
+- [ ] 设计并实现自定义 LSA Authentication Package
+- [ ] 联调 Winlogon / LSA / Credential Provider 数据流
 
-第八阶段：工程化与上线准备
+第八阶段：如果选择方案 B
+- [ ] 定义后端返回本机账户密码的接口协议
+- [ ] 在验证码和二次密码校验通过后接收本机账户密码
+- [ ] 将 `GetSerialization()` 改为使用返回的本机账户密码构造 Windows 登录凭据
+- [ ] 增加明文密码在内存中的最短停留与安全擦除
+- [ ] 评估密码轮换、缓存失效和后端存储风险
+
+第九阶段：工程化与上线准备
 - [ ] 统一日志方案
 - [ ] 修正 CLSID 与注册配置一致性
 - [ ] 在虚拟机中进行注册与登录测试
@@ -81,13 +151,14 @@ Rust + Windows Credential Provider 开发任务清单
 - [ ] 补齐异常场景测试
 
 当前执行顺序
-1. 完成第五阶段剩余项：验证码模式最终交接策略。
-2. 进入第六阶段：真实认证服务接入。
-3. 继续第七阶段：跨线程 COM 安全性收敛。
-4. 最后执行第八阶段：工程化与上线准备。
+1. 先完成第六阶段最后一项：确认选 A 还是 B。
+2. 如果追求长期正确性，进入第七阶段。
+3. 如果先做 PoC，进入第八阶段。
+4. 最后执行第九阶段。
 
 最近完成
 - 已完成认证核心、UI 视图模型、Provider/Credential 桥接重构。
 - 已完成 mock 验证码发送与校验流程。
 - 已完成验证码倒计时、发码按钮禁用/恢复和定时刷新。
 - 已完成“最终认证模式能力边界”和“跨线程 COM 刷新”技术评估。
+- 已完成“自定义 Authentication Package”与“本机账户密码回填”两条最终交接路线的方案整理。
