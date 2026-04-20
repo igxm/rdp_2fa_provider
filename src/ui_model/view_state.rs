@@ -46,6 +46,7 @@ impl CredentialViewState {
             }
             FieldId::SendSmsCodeButton => {
                 if self.mode == AuthMode::SmsCode {
+                    // Keep the button visible during cooldown so the user understands why resend is unavailable.
                     if session.is_sms_send_available() {
                         FieldDisplayState::EDITABLE
                     } else {
@@ -76,6 +77,7 @@ impl CredentialViewState {
             FieldId::SmsCode => String::from("验证码"),
             FieldId::SecondaryPassword => String::from("二次密码"),
             FieldId::SendSmsCodeButton => {
+                // Reuse the same button field for both the initial send and resend countdown states.
                 if session.sms_countdown_remaining() > 0 {
                     format!("重新发送({}s)", session.sms_countdown_remaining())
                 } else {

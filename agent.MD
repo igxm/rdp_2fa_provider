@@ -55,6 +55,7 @@ Rust + Windows Credential Provider 开发任务清单
 - [x] 完成 mock 验证码发送流程
 - [x] 完成 mock 验证码校验流程
 - [ ] 完成验证码模式的最终 Windows 凭据交接策略
+  说明：仅靠 Credential Provider 不能在自定义认证成功后直接放行进入系统；需要后续引入自定义 LSA Authentication Package，或在自定义认证成功后再安全地提供系统可接受的 Windows 凭据。
 - [x] 完成二次密码模式的提交联动
 
 第六阶段：真实认证服务接入
@@ -69,7 +70,8 @@ Rust + Windows Credential Provider 开发任务清单
 - [x] 增加发码按钮禁用/恢复逻辑
 - [x] 通过线程更新倒计时状态
 - [x] 将状态变化回传到 UI 刷新逻辑
-- [ ] 评估并优化跨线程访问 UI 相关 COM 对象的安全性
+- [x] 完成跨线程访问 UI 相关 COM 对象的初步安全评估
+  结论：当前实现把 `ICredentialProviderCredentialEvents` 带入后台线程并直接调用刷新接口，适合作为 mock/原型验证，但生产环境应优先改为封送回创建该 COM 对象的线程，或改造成由 UI 线程轮询/拉取状态。
 
 第八阶段：工程化与上线准备
 - [ ] 统一日志方案
@@ -88,3 +90,4 @@ Rust + Windows Credential Provider 开发任务清单
 - 已完成认证核心、UI 视图模型、Provider/Credential 桥接重构。
 - 已完成 mock 验证码发送与校验流程。
 - 已完成验证码倒计时、发码按钮禁用/恢复和定时刷新。
+- 已完成“最终认证模式能力边界”和“跨线程 COM 刷新”技术评估。

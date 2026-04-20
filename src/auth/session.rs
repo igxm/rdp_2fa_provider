@@ -12,7 +12,9 @@ pub struct AuthSession {
     status: AuthStatus,
     username: String,
     sms_code: String,
+    // Tracks whether we have already issued a code for the current login attempt.
     sms_code_sent: bool,
+    // Remaining resend cooldown in seconds.
     sms_countdown_remaining: u32,
     secondary_password: String,
     error_message: Option<String>,
@@ -64,6 +66,7 @@ impl AuthSession {
     pub fn apply(&mut self, action: AuthAction) {
         match action {
             AuthAction::SwitchMode(mode) => {
+                // A mode switch starts a fresh authentication attempt.
                 self.mode = mode;
                 self.status = AuthStatus::Idle;
                 self.sms_code.clear();
@@ -100,6 +103,7 @@ impl AuthSession {
                 }
             }
             AuthAction::FinishSmsCountdown => {
+                // Once the countdown completes, the user may request a new code.
                 self.sms_countdown_remaining = 0;
                 if self.sms_code_sent {
                     self.error_message = Some(String::from("验证码已过期，可重新发送"));
@@ -149,6 +153,7 @@ impl AuthSession {
 
         match self.mode {
             AuthMode::SmsCode => {
+                // SMS mode is only submittable after a code has been sent in the current session.
                 if !self.sms_code_sent {
                     SubmissionReadiness::Blocked(AuthError::SmsCodeNotSent)
                 } else if self.sms_code.trim().is_empty() {

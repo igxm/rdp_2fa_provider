@@ -1,5 +1,7 @@
 pub const MOCK_SMS_CODE: &str = "123456";
 
+// Mock service used during UI and state-machine development.
+// The real service will later be replaced with HTTP or IPC calls.
 pub struct MockSmsService;
 
 impl MockSmsService {

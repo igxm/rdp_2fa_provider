@@ -29,6 +29,9 @@ use crate::{
 
 const SMS_COUNTDOWN_SECONDS: u32 = 30;
 
+// `ICredentialProviderCredentialEvents` is a COM interface. We wrap it only to move the
+// reference into the countdown worker. This is a temporary implementation for mock flows;
+// see the task list for the cross-thread COM safety assessment and follow-up work.
 #[derive(Clone)]
 struct SendableCredentialEvents(ICredentialProviderCredentialEvents);
 unsafe impl Send for SendableCredentialEvents {}
@@ -219,6 +222,7 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
                 let username = shared.auth_session.username().to_string();
                 match MockSmsService::send_code(&username) {
                     Ok(code) => {
+                        // Mock mode publishes the test code so UI flow can be validated end-to-end.
                         shared.auth_session.apply(AuthAction::MarkSmsCodeSent(
                             format!("验证码已发送，测试码为 {code}"),
                             SMS_COUNTDOWN_SECONDS,
@@ -259,6 +263,8 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         {
             let mut creds = self.shared_creds.lock().unwrap();
             if creds.auth_session.mode() == AuthMode::SmsCode {
+                // Current SMS mode only performs custom verification and updates the UI state.
+                // It does not hand a Windows logon token back to Winlogon yet.
                 creds.auth_session.apply(AuthAction::BeginAuthentication);
                 match creds.auth_session.submission_readiness() {
                     SubmissionReadiness::Ready => {
@@ -485,6 +491,9 @@ fn spawn_sms_countdown(
     events: SendableCredentialEvents,
     credential: SendableCredential,
 ) {
+    // The countdown worker only mutates Rust state and then asks LogonUI to re-read fields.
+    // This cross-thread COM callback path works for the current mock flow but should be
+    // revisited before production to ensure apartment/threading requirements are satisfied.
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
 
