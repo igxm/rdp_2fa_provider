@@ -1,285 +1,359 @@
-// 引入必要的同步原语和Win32 API
-use std::sync::{Arc, Mutex};
-use windows::Win32::{
-    Foundation::{ERROR_NOT_READY, E_NOTIMPL, STATUS_SUCCESS}, Graphics::Gdi::HBITMAP, Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_FLAGS}, System::Com::CoTaskMemAlloc, UI::Shell::{
-        ICredentialProviderCredential, ICredentialProviderCredentialEvents, ICredentialProviderCredential_Impl, CPFIS_NONE, CPFS_DISPLAY_IN_BOTH, CPGSR_RETURN_CREDENTIAL_FINISHED, CPSI_ERROR, CPSI_NONE, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE, CREDENTIAL_PROVIDER_FIELD_STATE, CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, CREDENTIAL_PROVIDER_STATUS_ICON
-    }
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
 };
-use windows_core::{implement, BOOL, PCWSTR, PWSTR};
-use crate::{CLSID_SampleProvider, SharedCredentials};
 
-/// 凭据实现类，代表登录界面上的一个磁贴
-/// 每个凭据对应一个可选择的登录选项
+use windows::Win32::{
+    Foundation::{ERROR_NOT_READY, E_INVALIDARG, E_NOTIMPL, STATUS_SUCCESS},
+    Graphics::Gdi::HBITMAP,
+    Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_FLAGS},
+    System::Com::CoTaskMemAlloc,
+    UI::Shell::{
+        CPFIS_DISABLED, CPFIS_NONE, CPFIS_READONLY, CPFS_DISPLAY_IN_BOTH,
+        CPFS_DISPLAY_IN_SELECTED_TILE, CPFS_HIDDEN, CPGSR_RETURN_CREDENTIAL_FINISHED,
+        CPSI_ERROR, CPSI_NONE, CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION,
+        CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE, CREDENTIAL_PROVIDER_FIELD_STATE,
+        CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, CREDENTIAL_PROVIDER_STATUS_ICON,
+        ICredentialProviderCredential, ICredentialProviderCredentialEvents,
+        ICredentialProviderCredential_Impl,
+    },
+};
+use windows_core::{implement, BOOL, IUnknownImpl, PCWSTR, PWSTR};
+
+use crate::{
+    auth::{AuthAction, AuthMode, MockSmsService, SubmissionReadiness},
+    ui_model::{CredentialViewState, FieldDisplayState, FieldId},
+    CLSID_SampleProvider, SharedCredentials,
+};
+
+const SMS_COUNTDOWN_SECONDS: u32 = 30;
+
+#[derive(Clone)]
+struct SendableCredentialEvents(ICredentialProviderCredentialEvents);
+unsafe impl Send for SendableCredentialEvents {}
+unsafe impl Sync for SendableCredentialEvents {}
+
+#[derive(Clone)]
+struct SendableCredential(ICredentialProviderCredential);
+unsafe impl Send for SendableCredential {}
+unsafe impl Sync for SendableCredential {}
+
 #[implement(ICredentialProviderCredential)]
 pub struct SampleCredential {
-    // 用于接收系统事件通知的接口（互斥锁保护线程安全）
     events: Mutex<Option<ICredentialProviderCredentialEvents>>,
     shared_creds: Arc<Mutex<SharedCredentials>>,
-    auth_package_id: u32
+    auth_package_id: u32,
 }
 
 impl SampleCredential {
-    /// 创建新的凭据实例
     pub fn new(shared_creds: Arc<Mutex<SharedCredentials>>, auth_package_id: u32) -> Self {
-        info!("SampleCredential::new - 创建凭据实例");
-        // 引用计数不在此处管理了
-        // 原因是：当 SampleCredential 转换为 ICredentialProviderCredential COM 接口后，它的生命周期由 Windows COM 运行时管理，而不是 Rust
-        // 所以 SampleCredential 的Drop永远不会被调用，在new中创建的引用计数也永远不会减少
-        Self { 
+        info!("SampleCredential::new - create credential");
+        Self {
             events: Mutex::new(None),
-            shared_creds: shared_creds,
-            auth_package_id: auth_package_id
+            shared_creds,
+            auth_package_id,
         }
     }
 }
 
 impl Drop for SampleCredential {
     fn drop(&mut self) {
-        info!("SampleCredential::drop - 销毁凭据实例");
+        info!("SampleCredential::drop - destroy credential");
     }
 }
 
 impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
-    /// 设置事件通知接口，用于向系统发送状态变化
-    /// pcpce: 系统提供的事件接口
-    fn Advise(&self, pcpce: windows_core::Ref<ICredentialProviderCredentialEvents>) -> windows_core::Result<()> {
-        info!("SampleCredential::Advise - 注册事件通知");
+    fn Advise(
+        &self,
+        pcpce: windows_core::Ref<ICredentialProviderCredentialEvents>,
+    ) -> windows_core::Result<()> {
+        info!("SampleCredential::Advise - register credential events");
         let mut events = self.events.lock().unwrap();
-        *events = pcpce.clone(); // 保存事件接口
+        *events = pcpce.clone();
         Ok(())
     }
 
-    /// 取消事件通知
     fn UnAdvise(&self) -> windows_core::Result<()> {
-        info!("SampleCredential::UnAdvise - 取消事件通知");
+        info!("SampleCredential::UnAdvise - clear credential events");
         let mut events = self.events.lock().unwrap();
-        *events = None; // 清除事件接口
+        *events = None;
         Ok(())
     }
 
-    /// 当凭据磁贴被选中时调用
     fn SetSelected(&self) -> windows_core::Result<BOOL> {
-        info!("SampleCredential::SetSelected - 磁贴被选中");
-        Ok(true.into()) // 返回true表示处理成功
+        info!("SampleCredential::SetSelected - selected");
+        let mut shared = self.shared_creds.lock().unwrap();
+        shared.auth_session.apply(AuthAction::ClearError);
+        drop(shared);
+        refresh_ui(self)?;
+        Ok(true.into())
     }
 
-    /// 当凭据磁贴被取消选中时调用
     fn SetDeselected(&self) -> windows_core::Result<()> {
-        info!("SampleCredential::SetDeselected - 磁贴被取消选中");
+        info!("SampleCredential::SetDeselected - deselected");
         Ok(())
     }
 
-    /// 获取字段的状态（可见性和交互性）
-    /// dwfieldid: 字段ID
-    /// pcpfs: 输出参数，字段的显示状态
-    /// pcpfis: 输出参数，字段的交互状态
     fn GetFieldState(
-        &self, 
-        dwfieldid: u32, 
-        pcpfs: *mut CREDENTIAL_PROVIDER_FIELD_STATE, 
-        pcpfis: *mut CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE
+        &self,
+        dwfieldid: u32,
+        pcpfs: *mut CREDENTIAL_PROVIDER_FIELD_STATE,
+        pcpfis: *mut CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE,
     ) -> windows_core::Result<()> {
-        info!("SampleCredential::GetFieldState - 获取字段 {} 的状态", dwfieldid);
+        let field_id = map_field_id(dwfieldid)?;
+        let shared = self.shared_creds.lock().unwrap();
+        let view_state = CredentialViewState::from_session(&shared.auth_session);
+        let display_state = view_state.field_state(field_id, &shared.auth_session);
+
         unsafe {
-            match dwfieldid {
-                // 字段0: 图标，字段1: 文本
-                0 | 1 => {  
-                    *pcpfs = CPFS_DISPLAY_IN_BOTH; // 在磁贴和详细视图中都显示
-                    *pcpfis = CPFIS_NONE;          // 非交互元素（不能点击或编辑）
-                }
-                _ => {
-                    error!("SampleCredential::GetFieldState - 无效的字段ID: {}", dwfieldid);
-                    return Err(windows::Win32::Foundation::E_INVALIDARG.into());
-                }
-            }
+            *pcpfs = to_cpfs(field_id, display_state);
+            *pcpfis = to_cpfis(field_id, display_state, view_state.can_submit(&shared.auth_session));
         }
+
         Ok(())
     }
 
-    /// 获取文本字段的内容
-    /// dwfieldid: 字段ID
     fn GetStringValue(&self, dwfieldid: u32) -> windows_core::Result<PWSTR> {
-        info!("SampleCredential::GetStringValue - 获取字段 {} 的文本内容", dwfieldid);
-        let val = match dwfieldid {
-            1 => "FaceWinUnlock-Tauri-请勿点击此磁贴",  // 字段1的文本内容
-            _ => {
-                warn!("SampleCredential::GetStringValue - 字段 {} 无文本内容", dwfieldid);
-                ""
-            }
-        };
-        
-        // 分配COM可释放的内存（使用CoTaskMemAlloc）
-        unsafe {
-            let utf16: Vec<u16> = val.encode_utf16().chain(Some(0)).collect(); // 转换为UTF-16并添加终止符
-            let ptr = windows::Win32::System::Com::CoTaskMemAlloc(utf16.len() * 2); // 分配内存
-            if ptr.is_null() {
-                error!("SampleCredential::GetStringValue - 内存分配失败");
-                return Err(windows::Win32::Foundation::E_OUTOFMEMORY.into());
-            }
-            // 复制数据到分配的内存
-            std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
-            Ok(PWSTR(ptr as *mut _))
-        }
+        let field_id = map_field_id(dwfieldid)?;
+        let shared = self.shared_creds.lock().unwrap();
+        let view_state = CredentialViewState::from_session(&shared.auth_session);
+        let value = field_string(&shared, &view_state, field_id);
+        alloc_pwstr(&value)
     }
 
-    /// 获取图标字段的位图
-    /// _dwfieldid: 字段ID（这里是0）
     fn GetBitmapValue(&self, _dwfieldid: u32) -> windows_core::Result<HBITMAP> {
-        info!("SampleCredential::GetBitmapValue - 获取图标字段的位图");
-        Ok(HBITMAP::default())  // 返回默认图标
+        Ok(HBITMAP::default())
     }
 
-    /// 获取复选框字段的值（未实现）
-    fn GetCheckboxValue(&self, _dwfieldid: u32, _pbchecked: *mut BOOL, _ppszlabel: *mut PWSTR) -> windows_core::Result<()> {
-        info!("SampleCredential::GetCheckboxValue - 未实现的接口");
+    fn GetCheckboxValue(
+        &self,
+        _dwfieldid: u32,
+        _pbchecked: *mut BOOL,
+        _ppszlabel: *mut PWSTR,
+    ) -> windows_core::Result<()> {
         Err(E_NOTIMPL.into())
     }
 
-    /// 获取提交按钮字段的值（未实现）
-    fn GetSubmitButtonValue(&self, _dwfieldid: u32) -> windows_core::Result<u32> {
-        info!("SampleCredential::GetSubmitButtonValue - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 获取下拉框字段的选项数量（未实现）
-    fn GetComboBoxValueCount(&self, _dwfieldid: u32, _pcitems: *mut u32, _pdwselecteditem: *mut u32) -> windows_core::Result<()> {
-        info!("SampleCredential::GetComboBoxValueCount - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 获取下拉框指定选项的文本（未实现）
-    fn GetComboBoxValueAt(&self, _dwfieldid: u32, _dwitem: u32) -> windows_core::Result<PWSTR> {
-        info!("SampleCredential::GetComboBoxValueAt - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 设置文本字段的值（未实现）
-    fn SetStringValue(&self, _dwfieldid: u32, _psz: &windows_core::PCWSTR) -> windows_core::Result<()> {
-        info!("SampleCredential::SetStringValue - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 设置复选框字段的值（未实现）
-    fn SetCheckboxValue(&self, _dwfieldid: u32, _bchecked: BOOL) -> windows_core::Result<()> {
-        info!("SampleCredential::SetCheckboxValue - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 设置下拉框选中项（未实现）
-    fn SetComboBoxSelectedValue(&self, _dwfieldid: u32, _dwselecteditem: u32) -> windows_core::Result<()> {
-        info!("SampleCredential::SetComboBoxSelectedValue - 未实现的接口");
-        Err(E_NOTIMPL.into())
-    }
-
-    /// 命令链接被点击（未实现）
-    fn CommandLinkClicked(&self, _dwfieldid: u32) -> windows_core::Result<()> {
-       if _dwfieldid == SFI_SUBMIT {
-            let events = self.events.lock().unwrap();
-            if let Some(ev) = &*events {
-                unsafe  {
-                    // 显式告知系统：凭据已就绪，请调用 GetSerialization
-                    ev.CredentialsChanged()
-                }
-            } 
+    fn GetSubmitButtonValue(&self, dwfieldid: u32) -> windows_core::Result<u32> {
+        if map_field_id(dwfieldid)? == FieldId::SubmitButton {
+            Ok(FieldId::Username as u32)
+        } else {
+            Err(E_INVALIDARG.into())
         }
+    }
+
+    fn GetComboBoxValueCount(
+        &self,
+        _dwfieldid: u32,
+        _pcitems: *mut u32,
+        _pdwselecteditem: *mut u32,
+    ) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetComboBoxValueAt(&self, _dwfieldid: u32, _dwitem: u32) -> windows_core::Result<PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn SetStringValue(
+        &self,
+        dwfieldid: u32,
+        psz: &windows_core::PCWSTR,
+    ) -> windows_core::Result<()> {
+        let field_id = map_field_id(dwfieldid)?;
+        let value = unsafe { psz.to_string() }?;
+        let mut shared = self.shared_creds.lock().unwrap();
+
+        match field_id {
+            FieldId::Username => {
+                shared.auth_session.apply(AuthAction::UpdateUsername(value.clone()));
+                shared.username = value;
+            }
+            FieldId::SmsCode => {
+                shared.auth_session.apply(AuthAction::UpdateSmsCode(value));
+            }
+            FieldId::SecondaryPassword => {
+                shared
+                    .auth_session
+                    .apply(AuthAction::UpdateSecondaryPassword(value.clone()));
+                shared.password = value;
+            }
+            _ => return Err(E_INVALIDARG.into()),
+        }
+
+        drop(shared);
+        refresh_ui(self)?;
         Ok(())
     }
 
-    /// 序列化凭据信息（登录时调用）
-    fn GetSerialization(
-        &self, 
-        pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE, 
-        pcpcs: *mut CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION, 
-        _ppszoptionalstatustext: *mut PWSTR, 
-        _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+    fn SetCheckboxValue(&self, _dwfieldid: u32, _bchecked: BOOL) -> windows_core::Result<()> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn SetComboBoxSelectedValue(
+        &self,
+        _dwfieldid: u32,
+        _dwselecteditem: u32,
     ) -> windows_core::Result<()> {
-        info!("SampleCredential::GetSerialization - 序列化凭据");
-        unsafe {
-            let creds = self.shared_creds.lock().unwrap();
-            if !creds.is_ready {
-                error!("SampleCredential::GetSerialization - 凭据未就绪");
+        Err(E_NOTIMPL.into())
+    }
+
+    fn CommandLinkClicked(&self, dwfieldid: u32) -> windows_core::Result<()> {
+        let field_id = map_field_id(dwfieldid)?;
+        let credential: ICredentialProviderCredential = self.to_interface();
+        let events = self.events.lock().unwrap().clone();
+
+        let mut start_countdown = false;
+        let mut shared = self.shared_creds.lock().unwrap();
+        match field_id {
+            FieldId::SwitchAuthModeLink => {
+                shared.auth_session.toggle_mode();
+                if shared.auth_session.mode() != AuthMode::SecondaryPassword {
+                    shared.password.clear();
+                }
+                shared.is_ready = false;
+            }
+            FieldId::SendSmsCodeButton => {
+                shared.auth_session.apply(AuthAction::BeginSmsCodeSend);
+                let username = shared.auth_session.username().to_string();
+                match MockSmsService::send_code(&username) {
+                    Ok(code) => {
+                        shared.auth_session.apply(AuthAction::MarkSmsCodeSent(
+                            format!("验证码已发送，测试码为 {code}"),
+                            SMS_COUNTDOWN_SECONDS,
+                        ));
+                        start_countdown = true;
+                    }
+                    Err(message) => {
+                        shared.auth_session.apply(AuthAction::MarkFailed(message.to_string()));
+                    }
+                }
+            }
+            _ => return Err(E_INVALIDARG.into()),
+        }
+
+        drop(shared);
+        refresh_ui(self)?;
+
+        if start_countdown {
+            if let Some(events) = events {
+                spawn_sms_countdown(
+                    self.shared_creds.clone(),
+                    SendableCredentialEvents(events),
+                    SendableCredential(credential),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn GetSerialization(
+        &self,
+        pcpgsr: *mut CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE,
+        pcpcs: *mut CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION,
+        _ppszoptionalstatustext: *mut PWSTR,
+        _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
+    ) -> windows_core::Result<()> {
+        {
+            let mut creds = self.shared_creds.lock().unwrap();
+            if creds.auth_session.mode() == AuthMode::SmsCode {
+                creds.auth_session.apply(AuthAction::BeginAuthentication);
+                match creds.auth_session.submission_readiness() {
+                    SubmissionReadiness::Ready => {
+                        let code = creds.auth_session.sms_code().to_string();
+                        match MockSmsService::verify_code(&code) {
+                            Ok(()) => creds.auth_session.apply(AuthAction::MarkAuthenticated),
+                            Err(message) => {
+                                creds.auth_session.apply(AuthAction::MarkFailed(message.to_string()))
+                            }
+                        }
+                    }
+                    SubmissionReadiness::Blocked(error) => {
+                        creds.auth_session.apply(AuthAction::MarkFailed(error.message().to_string()));
+                    }
+                }
+                drop(creds);
+                refresh_ui(self)?;
                 return Err(ERROR_NOT_READY.into());
             }
+        }
 
-            // 设置响应为：成功，准备好序列化数据了
+        unsafe {
+            let creds = self.shared_creds.lock().unwrap();
+            let mut username = creds.username.clone();
+            let mut password = creds.password.clone();
+
+            if !creds.is_ready {
+                if creds.auth_session.mode() == AuthMode::SecondaryPassword
+                    && matches!(creds.auth_session.submission_readiness(), SubmissionReadiness::Ready)
+                {
+                    username = creds.auth_session.username().to_string();
+                    password = creds.auth_session.secondary_password().to_string();
+                } else {
+                    return Err(ERROR_NOT_READY.into());
+                }
+            }
+
             *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
 
-            // 准备拼接后的用户名 (Domain\User)
             let full_username = if creds.domain.is_empty() || creds.domain == "." {
-                creds.username.clone()
+                username
             } else {
-                format!("{}\\{}", creds.domain, creds.username)
+                format!("{}\\{}", creds.domain, username)
             };
 
-            // 获取管道收到的用户名和密码
             let v_username = to_wide_vec(&full_username);
-            let v_password = to_wide_vec(&creds.password);
-
-            // 转换成 PCWSTR (指向 u16 数组开头的指针)
+            let v_password = to_wide_vec(&password);
             let pwz_username = PCWSTR(v_username.as_ptr());
             let pwz_password = PCWSTR(v_password.as_ptr());
 
-            // 调用 LSA 序列化开始
-
             let mut auth_buffer_size: u32 = 0;
-
-            // 使用系统 API 打包 Kerberos 凭据
-            // 第一次调用获取长度
             let _ = CredPackAuthenticationBufferW(
-                CRED_PACK_FLAGS(0), // 默认传 0
+                CRED_PACK_FLAGS(0),
                 pwz_username,
                 pwz_password,
-                None, // 第一次传 None
-                &mut auth_buffer_size
+                None,
+                &mut auth_buffer_size,
             );
 
-            // 分配 COM 内存，系统会自动释放这块内存
             let out_buf = CoTaskMemAlloc(auth_buffer_size as usize) as *mut u8;
 
-            // 第二次调用真正打包
             CredPackAuthenticationBufferW(
                 CRED_PACK_FLAGS(0),
                 pwz_username,
                 pwz_password,
-                Some(out_buf), // 传入分配好的指针
-                &mut auth_buffer_size
+                Some(out_buf),
+                &mut auth_buffer_size,
             )?;
 
-            // 填充返回给 Windows 的结构体
             *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
-            (*pcpcs).clsidCredentialProvider = CLSID_SampleProvider; 
+            (*pcpcs).clsidCredentialProvider = CLSID_SampleProvider;
             (*pcpcs).cbSerialization = auth_buffer_size;
             (*pcpcs).rgbSerialization = out_buf;
-
-            // 重点：AuthenticationPackage 需要通过 LsaLookupAuthenticationPackage 获取
-            // 通常在 Provider 初始化时获取一次。
             (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
-
-            info!("用户名密码已发送到 LSA");
         }
+
         Ok(())
     }
 
-    /// 报告登录结果
     fn ReportResult(
-        &self, 
-        ntsstatus: windows::Win32::Foundation::NTSTATUS, 
-        _ntssubstatus: windows::Win32::Foundation::NTSTATUS, 
-        ppszoptionalstatustext: *mut PWSTR, 
-        pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON
+        &self,
+        ntsstatus: windows::Win32::Foundation::NTSTATUS,
+        _ntssubstatus: windows::Win32::Foundation::NTSTATUS,
+        ppszoptionalstatustext: *mut PWSTR,
+        pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
-        info!("SampleCredential::ReportResult - 报告登录结果");
         unsafe {
             if ntsstatus != STATUS_SUCCESS {
-                // 如果登录失败
                 let mut creds = self.shared_creds.lock().unwrap();
-                // 清空错误凭据
+                creds.auth_session.apply(AuthAction::Reset);
                 creds.username.clear();
                 creds.password.clear();
                 creds.is_ready = false;
 
-                // 设置错误提示文本
-                let error_text = "用户名或密码错误，请点击自己账户，手动输入密码进入系统。";
+                let error_text = "用户名或密码错误，请手动输入正确凭据";
                 let utf16: Vec<u16> = error_text.encode_utf16().chain(Some(0)).collect();
                 let ptr = windows::Win32::System::Com::CoTaskMemAlloc(utf16.len() * 2);
                 if !ptr.is_null() {
@@ -289,16 +363,172 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
 
                 *pcpsioptionalstatusicon = CPSI_ERROR;
             } else {
-                // 登录成功
                 *ppszoptionalstatustext = PWSTR(std::ptr::null_mut());
                 *pcpsioptionalstatusicon = CPSI_NONE;
             }
         }
+
         Ok(())
     }
 }
 
-// 将 String 转换为符合 Win32 要求的 UTF-16 向量（带 null 结尾）
 fn to_wide_vec(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn alloc_pwstr(value: &str) -> windows_core::Result<PWSTR> {
+    unsafe {
+        let utf16: Vec<u16> = value.encode_utf16().chain(Some(0)).collect();
+        let ptr = windows::Win32::System::Com::CoTaskMemAlloc(utf16.len() * 2);
+        if ptr.is_null() {
+            return Err(windows::Win32::Foundation::E_OUTOFMEMORY.into());
+        }
+
+        std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr as *mut u16, utf16.len());
+        Ok(PWSTR(ptr as *mut _))
+    }
+}
+
+fn map_field_id(field_id: u32) -> windows_core::Result<FieldId> {
+    match field_id {
+        0 => Ok(FieldId::TileImage),
+        1 => Ok(FieldId::LargeText),
+        2 => Ok(FieldId::Username),
+        3 => Ok(FieldId::SmsCode),
+        4 => Ok(FieldId::SecondaryPassword),
+        5 => Ok(FieldId::SendSmsCodeButton),
+        6 => Ok(FieldId::SwitchAuthModeLink),
+        7 => Ok(FieldId::SubmitButton),
+        8 => Ok(FieldId::StatusText),
+        _ => Err(E_INVALIDARG.into()),
+    }
+}
+
+fn to_cpfs(field_id: FieldId, display_state: FieldDisplayState) -> CREDENTIAL_PROVIDER_FIELD_STATE {
+    if !display_state.visible {
+        return CPFS_HIDDEN;
+    }
+
+    match field_id {
+        FieldId::TileImage | FieldId::LargeText => CPFS_DISPLAY_IN_BOTH,
+        _ => CPFS_DISPLAY_IN_SELECTED_TILE,
+    }
+}
+
+fn to_cpfis(
+    field_id: FieldId,
+    display_state: FieldDisplayState,
+    can_submit: bool,
+) -> CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE {
+    if !display_state.visible {
+        return CPFIS_NONE;
+    }
+
+    if !display_state.interactive {
+        return CPFIS_READONLY;
+    }
+
+    if field_id == FieldId::SubmitButton && !can_submit {
+        CPFIS_DISABLED
+    } else {
+        CPFIS_NONE
+    }
+}
+
+fn refresh_ui(credential_impl: &SampleCredential_Impl) -> windows_core::Result<()> {
+    let events = credential_impl.events.lock().unwrap().clone();
+    let Some(events) = events else {
+        return Ok(());
+    };
+
+    let credential: ICredentialProviderCredential = credential_impl.to_interface();
+    refresh_ui_components(
+        &credential_impl.shared_creds,
+        &SendableCredentialEvents(events),
+        &SendableCredential(credential),
+    )
+}
+
+fn refresh_ui_components(
+    shared_creds: &Arc<Mutex<SharedCredentials>>,
+    events: &SendableCredentialEvents,
+    credential: &SendableCredential,
+) -> windows_core::Result<()> {
+    let shared = shared_creds.lock().unwrap();
+    let view_state = CredentialViewState::from_session(&shared.auth_session);
+    let can_submit = view_state.can_submit(&shared.auth_session);
+
+    for field_id in FieldId::ALL {
+        let display_state = view_state.field_state(field_id, &shared.auth_session);
+        let cpfs = to_cpfs(field_id, display_state);
+        let cpfis = to_cpfis(field_id, display_state, can_submit);
+        let label = field_string(&shared, &view_state, field_id);
+        let wide = to_wide_vec(&label);
+        let wide_pcwstr = PCWSTR(wide.as_ptr());
+
+        unsafe {
+            events.0.SetFieldState(&credential.0, field_id as u32, cpfs)?;
+            events
+                .0
+                .SetFieldInteractiveState(&credential.0, field_id as u32, cpfis)?;
+            events
+                .0
+                .SetFieldString(&credential.0, field_id as u32, wide_pcwstr)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn spawn_sms_countdown(
+    shared_creds: Arc<Mutex<SharedCredentials>>,
+    events: SendableCredentialEvents,
+    credential: SendableCredential,
+) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(1));
+
+        let should_continue = {
+            let mut shared = shared_creds.lock().unwrap();
+            if shared.auth_session.mode() != AuthMode::SmsCode {
+                false
+            } else if shared.auth_session.sms_countdown_remaining() > 0 {
+                shared.auth_session.apply(AuthAction::TickSmsCountdown);
+                if shared.auth_session.sms_countdown_remaining() == 0 {
+                    shared.auth_session.apply(AuthAction::FinishSmsCountdown);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        };
+
+        let _ = refresh_ui_components(&shared_creds, &events, &credential);
+
+        if !should_continue {
+            break;
+        }
+    });
+}
+
+fn field_string(
+    shared: &SharedCredentials,
+    view_state: &CredentialViewState,
+    field_id: FieldId,
+) -> String {
+    match field_id {
+        FieldId::TileImage => String::new(),
+        FieldId::LargeText => view_state.label(FieldId::LargeText, &shared.auth_session),
+        FieldId::Username => shared.auth_session.username().to_string(),
+        FieldId::SmsCode => shared.auth_session.sms_code().to_string(),
+        FieldId::SecondaryPassword => shared.auth_session.secondary_password().to_string(),
+        FieldId::SendSmsCodeButton => view_state.label(FieldId::SendSmsCodeButton, &shared.auth_session),
+        FieldId::SwitchAuthModeLink => {
+            view_state.label(FieldId::SwitchAuthModeLink, &shared.auth_session)
+        }
+        FieldId::SubmitButton => view_state.label(FieldId::SubmitButton, &shared.auth_session),
+        FieldId::StatusText => view_state.status_text.clone(),
+    }
 }

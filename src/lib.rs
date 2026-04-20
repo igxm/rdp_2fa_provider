@@ -17,12 +17,15 @@ use windows::Win32::UI::Shell::ICredentialProvider;
 use windows_core::{implement, Ref, BOOL, GUID, PCWSTR};
 use windows::core::{Interface, HRESULT};
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
+use crate::auth::AuthSession;
 
 // 导入凭据提供程序和凭据的实现模块
 pub mod CSampleProvider;
 pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
+pub mod auth;
+pub mod ui_model;
 
 use CSampleProvider::SampleProvider;
 
@@ -124,6 +127,7 @@ pub const CLSID_SampleProvider: GUID = GUID::from_u128(0x8a7b9c6d_4e5f_89a0_8b7c
 
 // 共享的凭据信息
 pub struct SharedCredentials {
+    pub auth_session: AuthSession,
     pub username: String,
     pub password: String,
     pub domain: String,
@@ -290,9 +294,9 @@ pub unsafe extern "system" fn DllMain(
             
             info!("DllMain: 基础框架初始化完成");
 
-            if let Err(e) = result {
-                warn!("从注册表加载配置失败：{}", e);
-            }
+            // if let Err(e) = result {
+            //     warn!("从注册表加载配置失败：{}", e);
+            // }
         }
         // 可以添加其他事件的处理（如DLL_PROCESS_DETACH）
         _ => info!("DllMain: 处理事件，原因代码: {}", dw_reason),
