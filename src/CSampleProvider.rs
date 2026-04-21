@@ -11,7 +11,7 @@ use windows::Win32::{
 use windows_core::{implement, BOOL, PSTR, PWSTR};
 
 use crate::{
-    auth::AuthSession,
+    auth::{AuthSession, DEFAULT_AUTH_PACKAGE_NAME},
     dll_add_ref, dll_release, read_facewinunlock_registry, CPipeListener::CPipeListener,
     CSampleCredential::SampleCredential, ui_model::FieldId, SharedCredentials,
 };
@@ -44,7 +44,13 @@ impl SampleProvider {
             is_ready: false,
         }));
 
-        let auth_id = retrieve_negotiate_auth_package().unwrap_or(0);
+        let auth_id = match retrieve_custom_auth_package() {
+            Ok(package_id) => package_id,
+            Err(error) => {
+                error!("custom authentication package lookup failed: {:?}", error);
+                0
+            }
+        };
 
         Self {
             inner: Mutex::new(ProviderInner {
@@ -202,14 +208,22 @@ impl ICredentialProvider_Impl for SampleProvider_Impl {
     }
 }
 
-pub fn retrieve_negotiate_auth_package() -> windows_core::Result<u32> {
+pub fn retrieve_custom_auth_package() -> windows_core::Result<u32> {
+    let package_name = read_facewinunlock_registry("CUSTOM_AUTH_PACKAGE_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_AUTH_PACKAGE_NAME.to_string());
+
+    retrieve_auth_package_by_name(&package_name)
+}
+
+fn retrieve_auth_package_by_name(package_name_str: &str) -> windows_core::Result<u32> {
     let mut lsa_handle = HANDLE::default();
     let status = unsafe { LsaConnectUntrusted(&mut lsa_handle) };
     if status != STATUS_SUCCESS {
         return Err(status.into());
     }
 
-    let package_name_str = "Negotiate";
     let name_bytes = package_name_str.as_bytes();
     let package_name = LSA_STRING {
         Buffer: PSTR(name_bytes.as_ptr() as *mut u8),

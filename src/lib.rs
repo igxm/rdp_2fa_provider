@@ -1,9 +1,14 @@
 // 引入日志宏和日志库
+#![allow(non_snake_case, non_upper_case_globals)]
+
 #[macro_use] extern crate log;
 extern crate simplelog;
 use simplelog::*;
 use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ, REG_VALUE_TYPE};
-use std::fs::File;
+use std::{
+    fs::{create_dir_all, File},
+    path::PathBuf,
+};
 
 // 引入必要的系统类型和Win32 API绑定
 use std::ffi::{c_void, OsStr};
@@ -25,9 +30,14 @@ pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
 pub mod auth;
+pub mod lsa_package;
 pub mod ui_model;
 
 use CSampleProvider::SampleProvider;
+
+const FACEWINUNLOCK_REGISTRY_PATH: &str = "SOFTWARE\\facewinunlock-tauri";
+const DEFAULT_LOG_DIR: &str = r"C:\ProgramData\facewinunlock";
+const LOG_FILE_NAME: &str = "facewinunlock.log";
 
 // 全局引用计数器，用于管理DLL的生命周期
 // 当引用计数为0时，系统可以安全卸载DLL
@@ -46,7 +56,7 @@ pub fn dll_release() {
 
 /// 读取注册表数据
 pub fn read_facewinunlock_registry(key_name: &str) -> windows::core::Result<String> {
-    let reg_path = "SOFTWARE\\facewinunlock-tauri";
+    let reg_path = FACEWINUNLOCK_REGISTRY_PATH;
     // 打开HKLM下的注册表项
     let mut hkey: HKEY = HKEY::default();
 
@@ -252,6 +262,21 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> HRESULT {
 /// hinst_dll: DLL实例句柄
 /// dw_reason: 调用原因（加载、卸载等）
 /// reserved: 保留参数
+fn configured_log_dir() -> PathBuf {
+    read_facewinunlock_registry("DLL_LOG_PATH")
+        .ok()
+        .map(|path| normalize_registry_path(&path))
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LOG_DIR))
+}
+
+fn normalize_registry_path(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    let normalized = trimmed.strip_prefix(r"\\?\").unwrap_or(trimmed);
+    PathBuf::from(normalized)
+}
+
+/// DLL entry point invoked by Windows when the provider DLL is loaded.
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "system" fn DllMain(
@@ -263,7 +288,7 @@ pub unsafe extern "system" fn DllMain(
         DLL_PROCESS_ATTACH => {
             // 读取注册表设置
             // let result = read_facewinunlock_registry("DLL_LOG_PATH");
-            let mut log_path = String::from("C:");
+            let log_path = configured_log_dir();
 
             // if let Ok(log_path_reg) = result.clone() {
             //     log_path = if log_path_reg.starts_with("\\\\?\\") {
@@ -274,7 +299,7 @@ pub unsafe extern "system" fn DllMain(
             // }
 
             // 初始化日志系统
-            if let Ok(file) = File::create(log_path + "\\facewinunlock.log") {
+            if let Ok(file) = create_dir_all(&log_path).and_then(|_| File::create(log_path.join(LOG_FILE_NAME))) {
                 // 日志时间太麻烦，不搞了，没有日期影响不大
                 if let Ok(config) = ConfigBuilder::new().set_time_offset_to_local(){
                     match CombinedLogger::init(

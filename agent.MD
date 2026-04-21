@@ -162,3 +162,22 @@ Rust + Windows Credential Provider 开发任务清单
 - 已完成验证码倒计时、发码按钮禁用/恢复和定时刷新。
 - 已完成“最终认证模式能力边界”和“跨线程 COM 刷新”技术评估。
 - 已完成“自定义 Authentication Package”与“本机账户密码回填”两条最终交接路线的方案整理。
+
+2026-04-21 Scheme A execution update
+- [x] Final route selected: Scheme A, custom LSA Authentication Package.
+- [x] Custom Authentication Package name defined: `Rdp2FaAuthPackage`.
+- [x] Registry override defined: `HKLM\SOFTWARE\facewinunlock-tauri\CUSTOM_AUTH_PACKAGE_NAME`.
+- [x] Credential Provider package lookup changed from `Negotiate` to custom package lookup.
+- [x] Credential Provider `GetSerialization` changed from `CredPackAuthenticationBufferW` to custom binary serialization.
+- [x] Added LSA package entry-point skeleton: `SpLsaModeInitialize`, `InitializePackage`, and `LogonUserEx2` payload parsing.
+- [x] Code layering updated: custom serialization protocol lives in `auth::package`; LSA code remains a Windows adapter layer.
+- [ ] Implement LSA token/profile construction after custom verification succeeds.
+- [ ] Register the LSA Authentication Package in a VM-safe installer flow.
+- [ ] Validate Winlogon / LSA / Credential Provider end-to-end data flow in a VM.
+
+Scheme A serialization format v1
+- Header: 8 bytes magic `RDP2FA\0\0`.
+- Version: little-endian `u16`, currently `1`.
+- Mode: little-endian `u16`, `1` means SMS code, `2` means secondary password.
+- Fields: four length-prefixed UTF-16LE strings in this order: username, domain, sms_code, secondary_password.
+- Field length: little-endian `u32`, counted in UTF-16 code units, without trailing NUL.

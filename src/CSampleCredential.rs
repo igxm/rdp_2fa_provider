@@ -5,9 +5,8 @@ use std::{
 };
 
 use windows::Win32::{
-    Foundation::{ERROR_NOT_READY, E_INVALIDARG, E_NOTIMPL, STATUS_SUCCESS},
+    Foundation::{ERROR_NOT_READY, E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, STATUS_SUCCESS},
     Graphics::Gdi::HBITMAP,
-    Security::Credentials::{CredPackAuthenticationBufferW, CRED_PACK_FLAGS},
     System::Com::CoTaskMemAlloc,
     UI::Shell::{
         CPFIS_DISABLED, CPFIS_NONE, CPFIS_READONLY, CPFS_DISPLAY_IN_BOTH,
@@ -22,7 +21,7 @@ use windows::Win32::{
 use windows_core::{implement, BOOL, IUnknownImpl, PCWSTR, PWSTR};
 
 use crate::{
-    auth::{AuthAction, AuthMode, MockSmsService, SubmissionReadiness},
+    auth::{AuthAction, AuthMode, CustomAuthSerialization, MockSmsService, SubmissionReadiness},
     ui_model::{CredentialViewState, FieldDisplayState, FieldId},
     CLSID_SampleProvider, SharedCredentials,
 };
@@ -260,83 +259,61 @@ impl ICredentialProviderCredential_Impl for SampleCredential_Impl {
         _ppszoptionalstatustext: *mut PWSTR,
         _pcpsioptionalstatusicon: *mut CREDENTIAL_PROVIDER_STATUS_ICON,
     ) -> windows_core::Result<()> {
-        {
+        let payload = {
             let mut creds = self.shared_creds.lock().unwrap();
-            if creds.auth_session.mode() == AuthMode::SmsCode {
-                // Current SMS mode only performs custom verification and updates the UI state.
-                // It does not hand a Windows logon token back to Winlogon yet.
-                creds.auth_session.apply(AuthAction::BeginAuthentication);
-                match creds.auth_session.submission_readiness() {
-                    SubmissionReadiness::Ready => {
-                        let code = creds.auth_session.sms_code().to_string();
-                        match MockSmsService::verify_code(&code) {
-                            Ok(()) => creds.auth_session.apply(AuthAction::MarkAuthenticated),
-                            Err(message) => {
-                                creds.auth_session.apply(AuthAction::MarkFailed(message.to_string()))
-                            }
-                        }
-                    }
-                    SubmissionReadiness::Blocked(error) => {
-                        creds.auth_session.apply(AuthAction::MarkFailed(error.message().to_string()));
-                    }
-                }
+
+            if self.auth_package_id == 0 {
+                creds.auth_session.apply(AuthAction::MarkFailed(
+                    "自定义 Authentication Package 未注册，无法提交登录".to_string(),
+                ));
                 drop(creds);
                 refresh_ui(self)?;
                 return Err(ERROR_NOT_READY.into());
             }
-        }
 
-        unsafe {
-            let creds = self.shared_creds.lock().unwrap();
-            let mut username = creds.username.clone();
-            let mut password = creds.password.clone();
-
-            if !creds.is_ready {
-                if creds.auth_session.mode() == AuthMode::SecondaryPassword
-                    && matches!(creds.auth_session.submission_readiness(), SubmissionReadiness::Ready)
-                {
-                    username = creds.auth_session.username().to_string();
-                    password = creds.auth_session.secondary_password().to_string();
-                } else {
+            creds.auth_session.apply(AuthAction::BeginAuthentication);
+            match creds.auth_session.submission_readiness() {
+                SubmissionReadiness::Ready => {
+                    if creds.auth_session.mode() == AuthMode::SmsCode {
+                        let code = creds.auth_session.sms_code().to_string();
+                        match MockSmsService::verify_code(&code) {
+                            Ok(()) => creds.auth_session.apply(AuthAction::MarkAuthenticated),
+                            Err(message) => {
+                                creds.auth_session.apply(AuthAction::MarkFailed(message.to_string()));
+                                drop(creds);
+                                refresh_ui(self)?;
+                                return Err(ERROR_NOT_READY.into());
+                            }
+                        }
+                    }
+                }
+                SubmissionReadiness::Blocked(error) => {
+                    creds.auth_session.apply(AuthAction::MarkFailed(error.message().to_string()));
+                    drop(creds);
+                    refresh_ui(self)?;
                     return Err(ERROR_NOT_READY.into());
                 }
             }
 
-            *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
+            CustomAuthSerialization {
+                mode: creds.auth_session.mode(),
+                username: creds.auth_session.username().to_string(),
+                domain: creds.domain.clone(),
+                sms_code: creds.auth_session.sms_code().to_string(),
+                secondary_password: creds.auth_session.secondary_password().to_string(),
+            }
+            .to_bytes()
+        };
 
-            let full_username = if creds.domain.is_empty() || creds.domain == "." {
-                username
-            } else {
-                format!("{}\\{}", creds.domain, username)
-            };
-
-            let v_username = to_wide_vec(&full_username);
-            let v_password = to_wide_vec(&password);
-            let pwz_username = PCWSTR(v_username.as_ptr());
-            let pwz_password = PCWSTR(v_password.as_ptr());
-
-            let mut auth_buffer_size: u32 = 0;
-            let _ = CredPackAuthenticationBufferW(
-                CRED_PACK_FLAGS(0),
-                pwz_username,
-                pwz_password,
-                None,
-                &mut auth_buffer_size,
-            );
-
-            let out_buf = CoTaskMemAlloc(auth_buffer_size as usize) as *mut u8;
-
-            CredPackAuthenticationBufferW(
-                CRED_PACK_FLAGS(0),
-                pwz_username,
-                pwz_password,
-                Some(out_buf),
-                &mut auth_buffer_size,
-            )?;
-
+        unsafe {
+            let out_buf = CoTaskMemAlloc(payload.len()) as *mut u8;
+            if out_buf.is_null() {
+                return Err(E_OUTOFMEMORY.into());
+            }
+            std::ptr::copy_nonoverlapping(payload.as_ptr(), out_buf, payload.len());
             *pcpgsr = CPGSR_RETURN_CREDENTIAL_FINISHED;
             (*pcpcs).clsidCredentialProvider = CLSID_SampleProvider;
-            (*pcpcs).cbSerialization = auth_buffer_size;
+            (*pcpcs).cbSerialization = payload.len() as u32;
             (*pcpcs).rgbSerialization = out_buf;
             (*pcpcs).ulAuthenticationPackage = self.auth_package_id;
         }

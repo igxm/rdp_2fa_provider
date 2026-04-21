@@ -1,11 +1,17 @@
 Windows Registry Editor Version 5.00
 
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{12345678-1234-1234-1234-123456789ABC}]
+[HKEY_LOCAL_MACHINE\SOFTWARE\facewinunlock-tauri]
+"DLL_LOG_PATH"="C:\\ProgramData\\facewinunlock"
+"SHOW_TILE"="1"
+"CONNECT_TO_PIPE"="0"
+"CUSTOM_AUTH_PACKAGE_NAME"="Rdp2FaAuthPackage"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}]
 @="RDP 2FA Provider"
 
-[HKEY_CLASSES_ROOT\CLSID\{12345678-1234-1234-1234-123456789ABC}]
+[HKEY_CLASSES_ROOT\CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}]
 @="RDP 2FA Provider"
 
-[HKEY_CLASSES_ROOT\CLSID\{12345678-1234-1234-1234-123456789ABC}\InprocServer32]
+[HKEY_CLASSES_ROOT\CLSID\{8a7b9c6d-4e5f-89a0-8b7c-6d5e4f3e2d1c}\InprocServer32]
 @="C:\\Windows\\System32\\rdp_2fa_provider.dll"
 "ThreadingModel"="Apartment"
