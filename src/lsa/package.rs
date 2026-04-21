@@ -12,7 +12,7 @@ use windows::Win32::{
 };
 use windows_core::PSTR;
 
-use crate::auth::{CustomAuthSerialization, DEFAULT_AUTH_PACKAGE_NAME};
+use crate::auth::{verify_custom_auth_payload, DEFAULT_AUTH_PACKAGE_NAME};
 
 static PACKAGE_TABLE: OnceLock<SECPKG_FUNCTION_TABLE> = OnceLock::new();
 static LSA_FUNCTION_TABLE: OnceLock<LSA_SECPKG_FUNCTION_TABLE> = OnceLock::new();
@@ -118,7 +118,7 @@ unsafe extern "system" fn lsa_logon_user_ex2(
 
     let payload =
         unsafe { slice::from_raw_parts(protocolsubmitbuffer as *const u8, submitbuffersize as usize) };
-    if CustomAuthSerialization::from_bytes(payload).is_err() {
+    if verify_custom_auth_payload(payload).is_err() {
         return STATUS_INVALID_PARAMETER;
     }
 

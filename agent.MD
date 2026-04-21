@@ -172,6 +172,7 @@ Rust + Windows Credential Provider 开发任务清单
 - [x] Added LSA package entry-point skeleton: `SpLsaModeInitialize`, `InitializePackage`, and `LogonUserEx2` payload parsing.
 - [x] Code layering updated: custom serialization protocol lives in `auth::package`; LSA adapter lives in `lsa::package`.
 - [x] LSA `SpInitialize` callback added to capture `LSA_SECPKG_FUNCTION_TABLE` for future token/profile construction.
+- [x] LSA custom payload verification now delegates to auth core before token/profile construction.
 - [ ] Implement LSA token/profile construction after custom verification succeeds.
 - [x] Register/unregister scripts added for VM-safe LSA Authentication Package testing.
 - [ ] Validate Winlogon / LSA / Credential Provider end-to-end data flow in a VM.
