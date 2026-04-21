@@ -86,6 +86,7 @@ Scheme A serialization format v1
 - [x] 重构 Credential，`GetSerialization` 从核心层读取提交条件
 - [x] 将共享状态升级为 `AuthSession`
 - [x] 增加 UI 刷新逻辑，支持字段状态和文案主动更新
+- [ ] 将跨线程刷新 COM UI 改为适合生产长期维护的实现，避免继续依赖线程间直接调用 `ICredentialProviderCredentialEvents`
 
 第五阶段：最小可用认证流程
 - [x] 接入 mock 认证服务
@@ -138,6 +139,7 @@ Scheme A serialization format v1
 - [x] 增加 VM 注册状态预检脚本：`scripts/test_vm_registration_state.ps1`
 - [ ] 在虚拟机中进行注册与登录测试
 - [ ] 验证 Windows 10/11 x64 兼容性
+- [ ] 验证生产化 UI 刷新方案的 COM apartment/threading 行为
 - [x] 补齐异常场景测试：自定义 payload 边界与 LSA payload 校验失败路径
 - [x] 梳理发布/安装/回滚操作手册：`docs/vm_validation_checklist.md`
 
@@ -145,8 +147,9 @@ Scheme A serialization format v1
 1. 完成第七阶段 LSA token/profile 构造策略设计。
 2. 根据策略实现 profile buffer 构造。
 3. 根据策略实现 token 构造或确定可接受的 LSA token 创建路径。
-4. 在 VM 中注册 LSA Authentication Package 并联调完整数据流。
-5. 执行 Windows 10/11 x64 兼容性和异常场景测试。
+4. 将跨线程刷新 COM UI 改为适合生产长期维护的 UI 线程调度/消息化方案。
+5. 在 VM 中注册 LSA Authentication Package 并联调完整数据流。
+6. 执行 Windows 10/11 x64 兼容性和异常场景测试。
 
 最近完成
 - [x] 2026-04-21：完成方案 A 选择，并把 Provider/Credential 从 Windows 原生密码打包切到自定义 payload。
