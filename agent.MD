@@ -7,72 +7,45 @@ Rust + Windows Credential Provider 开发任务清单
 1. 薄 UI 桥接层：COM 回调中不堆业务逻辑。
 2. 厚认证核心：认证状态、模式切换、输入校验、错误处理集中管理。
 3. 可测试：核心逻辑尽量不依赖 COM，优先支持单元测试。
-4. 分层演进：先做 mock 与桥接，再决定最终登录交接方案。
+4. 分层演进：先做 mock 与桥接，再推进最终登录交接方案。
+5. 系统级改动只在 VM 中验证，必须保留注册和回滚脚本。
 
 当前关键结论
 1. 单靠 Credential Provider 不能在自定义认证成功后直接放行进入系统。
-2. 如果要完全不依赖 Windows 原生用户名/密码认证，最终需要自定义 LSA Authentication Package。
-3. 如果后端可以在认证成功后返回本机可用账户和密码，则可以把它们包装成 Windows 登录凭据交给 Winlogon。
-4. 第 3 条可行，但安全风险高，要求后端能够安全持有并下发本机账户密码，这通常只适合作为过渡方案。
+2. 长期正确路线选择方案 A：自定义 LSA Authentication Package。
+3. 方案 B（后端返回本机账户密码再打包 Windows 凭据）技术上可行，但安全风险高，仅适合作为 PoC 或过渡方案。
+4. 当前代码已进入方案 A：Credential Provider 产出自定义 payload，LSA 包负责解析、验证并最终生成 Windows 可接受的登录结果。
 
-自定义 Authentication Package 方案草图
+当前代码分层
+1. `auth::*`
+   - 认证核心、模式、状态机、错误、mock 服务。
+   - `auth::package` 定义自定义 Authentication Package 名称和序列化协议。
+   - `auth::verification` 负责校验 LSA 收到的自定义 payload。
+2. `ui_model::*`
+   - 纯 UI 状态计算：字段显隐、交互状态、按钮文案、状态文案。
+3. `CSampleProvider.rs` / `CSampleCredential.rs`
+   - Windows Credential Provider COM 桥接层。
+   - 只负责读取核心状态、刷新 UI、提交序列化结果。
+4. `lsa::*`
+   - Windows LSA Authentication Package 适配层。
+   - 负责 LSA 回调、NTSTATUS、函数表、LSA 分配内存和 token/profile 交接。
+5. `scripts::*`
+   - VM 中注册/回滚 Credential Provider 和 LSA Authentication Package 的辅助脚本。
 
-方案 A：正统方案
-1. Credential Provider 采集验证码、二次密码、设备信息等自定义数据。
-2. `GetSerialization` 不再构造 `CredPackAuthenticationBufferW` 的用户名/密码缓冲，而是构造“自定义认证包可识别”的二进制序列化数据。
-3. `CSampleProvider.rs` 中不再调用 `retrieve_negotiate_auth_package()` 获取 `Negotiate` 包 ID，而是改成获取“自定义 Authentication Package”的包 ID。
-4. Winlogon 将序列化结果交给 LSA。
-5. 自定义 Authentication Package 解析数据、完成认证、生成系统接受的登录结果。
+方案 A 数据流
+1. Credential Provider 采集用户名、验证码或二次密码。
+2. `GetSerialization` 生成自定义二进制 payload，不再调用 `CredPackAuthenticationBufferW`。
+3. Provider 通过 `retrieve_custom_auth_package()` 查找 `Rdp2FaAuthPackage` 包 ID。
+4. Winlogon 将 payload 交给 LSA。
+5. LSA 包解析 payload，调用 auth 核心校验。
+6. LSA 包构造 profile/token 信息并返回给 Winlogon。
 
-方案 B：过渡方案
-1. Credential Provider 先完成验证码或二次密码校验。
-2. 校验成功后，后端返回“本机可登录账户 + 密码”。
-3. `GetSerialization` 使用现有 `CredPackAuthenticationBufferW` 路线，将这组账户密码打包成 Windows 可接受的登录凭据。
-4. Winlogon 继续走现有 Windows 认证链路。
-
-两种方案对比
-1. 方案 A
-   - 优点：架构正确，真正满足“自定义认证通过后放行”。
-   - 缺点：实现复杂，需要开发和注册自定义 LSA Authentication Package。
-2. 方案 B
-   - 优点：改造小，可以复用当前 `GetSerialization` 主体逻辑。
-   - 缺点：本质仍依赖 Windows 原生账户密码；后端保存或下发本机密码带来较大安全风险。
-
-对当前代码的具体影响
-
-`src/CSampleProvider.rs`
-1. 当前 `retrieve_negotiate_auth_package()` 获取的是 `Negotiate` 包 ID。
-2. 如果走方案 A：
-   - 需要替换为 `retrieve_custom_auth_package()`。
-   - 包名改为你们自定义 Authentication Package 的名称。
-3. 如果走方案 B：
-   - 可以保留“系统包”路线，但更合适的是明确使用 MSV1_0 或 Kerberos 对应的目标包，而不是继续模糊地使用 `Negotiate`。
-
-`src/CSampleCredential.rs`
-1. 当前 `GetSerialization()` 的核心逻辑是：
-   - 收集用户名/密码
-   - 使用 `CredPackAuthenticationBufferW`
-   - 返回 Windows 原生可识别的序列化凭据
-2. 如果走方案 A：
-   - 这段实现要被重写为“自定义序列化格式”。
-   - 不再使用 `CredPackAuthenticationBufferW`。
-3. 如果走方案 B：
-   - 这段实现可以保留总体结构。
-   - 但用户名/密码来源改成“自定义认证成功后由接口返回的本机账户密码”。
-
-关于“接口返回本机账户和密码，再构建 Windows 登录凭据”的可行性
-1. 技术上可行。
-2. 可行前提：
-   - 目标机器上确实存在该本机账户。
-   - 返回的密码是当前有效密码。
-   - 凭据能被当前目标认证包接受。
-3. 主要风险：
-   - 服务端或中间链路需要保存、传输、下发本机明文密码。
-   - 密码轮换、失效、缓存一致性都很麻烦。
-   - 一旦后端或传输被攻破，等于泄露本机登录口令。
-4. 结论：
-   - 可作为 PoC 或过渡方案。
-   - 不建议作为长期生产方案。
+Scheme A serialization format v1
+1. Header：8 bytes magic `RDP2FA\0\0`。
+2. Version：little-endian `u16`，当前为 `1`。
+3. Mode：little-endian `u16`，`1` 表示 SMS code，`2` 表示 secondary password。
+4. Fields：四个 length-prefixed UTF-16LE 字符串，顺序为 username、domain、sms_code、secondary_password。
+5. Field length：little-endian `u32`，按 UTF-16 code unit 计数，不包含 trailing NUL。
 
 阶段任务
 
@@ -127,16 +100,25 @@ Rust + Windows Credential Provider 开发任务清单
 - [x] 评估跨线程刷新 COM UI 的初步风险
 - [x] 完成自定义 Authentication Package 方案草图
 - [x] 评估“接口返回本机账户密码，再构建 Windows 凭据”的可行性
-- [ ] 选择最终路线：方案 A 或方案 B
+- [x] 选择最终路线：方案 A，自定义 LSA Authentication Package
 
-第七阶段：如果选择方案 A
-- [ ] 定义自定义 Authentication Package 名称与序列化格式
-- [ ] 将 `retrieve_negotiate_auth_package()` 替换为 `retrieve_custom_auth_package()`
-- [ ] 重写 `GetSerialization()` 为自定义序列化实现
-- [ ] 设计并实现自定义 LSA Authentication Package
+第七阶段：方案 A 实施
+- [x] 定义自定义 Authentication Package 名称：`Rdp2FaAuthPackage`
+- [x] 定义自定义序列化格式：`auth::package`
+- [x] 在注册表配置中加入 `CUSTOM_AUTH_PACKAGE_NAME`
+- [x] 将 `retrieve_negotiate_auth_package()` 替换为 `retrieve_custom_auth_package()`
+- [x] 重写 `GetSerialization()` 为自定义序列化实现
+- [x] 新增 LSA 包入口骨架：`SpLsaModeInitialize`
+- [x] 新增 LSA `InitializePackage` 回调并返回包名
+- [x] 新增 LSA `SpInitialize` 回调并捕获 `LSA_SECPKG_FUNCTION_TABLE`
+- [x] 新增 LSA `LogonUserEx2` payload 解析入口
+- [x] LSA payload 校验委托给 `auth::verification`
+- [ ] 设计 LSA token/profile 构造策略
+- [ ] 实现 LSA profile buffer 构造
+- [ ] 实现 LSA token 构造或对接可接受的 LSA token 创建路径
 - [ ] 联调 Winlogon / LSA / Credential Provider 数据流
 
-第八阶段：如果选择方案 B
+第八阶段：方案 B（已放弃，仅保留为过渡备选）
 - [ ] 定义后端返回本机账户密码的接口协议
 - [ ] 在验证码和二次密码校验通过后接收本机账户密码
 - [ ] 将 `GetSerialization()` 改为使用返回的本机账户密码构造 Windows 登录凭据
@@ -144,42 +126,25 @@ Rust + Windows Credential Provider 开发任务清单
 - [ ] 评估密码轮换、缓存失效和后端存储风险
 
 第九阶段：工程化与上线准备
-- [ ] 统一日志方案
-- [ ] 修正 CLSID 与注册配置一致性
+- [x] 统一基础日志路径配置：`DLL_LOG_PATH`
+- [x] 修正 CLSID 与注册配置一致性
+- [x] 增加 LSA Authentication Package 注册脚本
+- [x] 增加 LSA Authentication Package 回滚脚本
 - [ ] 在虚拟机中进行注册与登录测试
 - [ ] 验证 Windows 10/11 x64 兼容性
 - [ ] 补齐异常场景测试
+- [ ] 梳理发布/安装/回滚操作手册
 
 当前执行顺序
-1. 先完成第六阶段最后一项：确认选 A 还是 B。
-2. 如果追求长期正确性，进入第七阶段。
-3. 如果先做 PoC，进入第八阶段。
-4. 最后执行第九阶段。
+1. 完成第七阶段 LSA token/profile 构造策略设计。
+2. 根据策略实现 profile buffer 构造。
+3. 根据策略实现 token 构造或确定可接受的 LSA token 创建路径。
+4. 在 VM 中注册 LSA Authentication Package 并联调完整数据流。
+5. 执行 Windows 10/11 x64 兼容性和异常场景测试。
 
 最近完成
-- 已完成认证核心、UI 视图模型、Provider/Credential 桥接重构。
-- 已完成 mock 验证码发送与校验流程。
-- 已完成验证码倒计时、发码按钮禁用/恢复和定时刷新。
-- 已完成“最终认证模式能力边界”和“跨线程 COM 刷新”技术评估。
-- 已完成“自定义 Authentication Package”与“本机账户密码回填”两条最终交接路线的方案整理。
-
-2026-04-21 Scheme A execution update
-- [x] Final route selected: Scheme A, custom LSA Authentication Package.
-- [x] Custom Authentication Package name defined: `Rdp2FaAuthPackage`.
-- [x] Registry override defined: `HKLM\SOFTWARE\facewinunlock-tauri\CUSTOM_AUTH_PACKAGE_NAME`.
-- [x] Credential Provider package lookup changed from `Negotiate` to custom package lookup.
-- [x] Credential Provider `GetSerialization` changed from `CredPackAuthenticationBufferW` to custom binary serialization.
-- [x] Added LSA package entry-point skeleton: `SpLsaModeInitialize`, `InitializePackage`, and `LogonUserEx2` payload parsing.
-- [x] Code layering updated: custom serialization protocol lives in `auth::package`; LSA adapter lives in `lsa::package`.
-- [x] LSA `SpInitialize` callback added to capture `LSA_SECPKG_FUNCTION_TABLE` for future token/profile construction.
-- [x] LSA custom payload verification now delegates to auth core before token/profile construction.
-- [ ] Implement LSA token/profile construction after custom verification succeeds.
-- [x] Register/unregister scripts added for VM-safe LSA Authentication Package testing.
-- [ ] Validate Winlogon / LSA / Credential Provider end-to-end data flow in a VM.
-
-Scheme A serialization format v1
-- Header: 8 bytes magic `RDP2FA\0\0`.
-- Version: little-endian `u16`, currently `1`.
-- Mode: little-endian `u16`, `1` means SMS code, `2` means secondary password.
-- Fields: four length-prefixed UTF-16LE strings in this order: username, domain, sms_code, secondary_password.
-- Field length: little-endian `u32`, counted in UTF-16 code units, without trailing NUL.
+- [x] 2026-04-21：完成方案 A 选择，并把 Provider/Credential 从 Windows 原生密码打包切到自定义 payload。
+- [x] 2026-04-21：完成 `auth::package` 自定义序列化协议和 round-trip 测试。
+- [x] 2026-04-21：完成 LSA 包入口骨架、payload 解析和 auth 核心校验委托。
+- [x] 2026-04-21：完成代码分层整理：认证协议在 `auth::package`，LSA 桥接在 `lsa::package`。
+- [x] 2026-04-21：完成 LSA 注册/回滚脚本。
