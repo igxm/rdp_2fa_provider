@@ -2,7 +2,7 @@ use std::{ffi::c_void, slice, sync::OnceLock};
 
 use windows::Win32::{
     Foundation::{
-        LUID, NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_NOT_IMPLEMENTED, STATUS_SUCCESS,
+        LUID, NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_SUCCESS,
     },
     Security::Authentication::Identity::{
         LSA_DISPATCH_TABLE, LSA_SECPKG_FUNCTION_TABLE, LSA_STRING, LSA_TOKEN_INFORMATION_TYPE,
@@ -15,8 +15,10 @@ use windows_core::PSTR;
 use crate::{
     auth::{verify_custom_auth_payload, DEFAULT_AUTH_PACKAGE_NAME},
     lsa::{
+        account::resolve_account_sid,
         memory::allocate_lsa_unicode_string,
-        profile::build_profile_buffer,
+        profile::{allocate_client_profile_buffer, build_profile_buffer},
+        token::{allocate_token_information_v1, create_token_from_v1},
     },
 };
 
@@ -101,14 +103,14 @@ unsafe extern "system" fn lsa_initialize_package(
 }
 
 unsafe extern "system" fn lsa_logon_user_ex2(
-    _clientrequest: *const *const c_void,
-    _logontype: SECURITY_LOGON_TYPE,
+    clientrequest: *const *const c_void,
+    logontype: SECURITY_LOGON_TYPE,
     protocolsubmitbuffer: *const c_void,
     _clientbufferbase: *const c_void,
     submitbuffersize: u32,
     profilebuffer: *mut *mut c_void,
     profilebuffersize: *mut u32,
-    _logonid: *mut LUID,
+    logonid: *mut LUID,
     substatus: *mut i32,
     tokeninformationtype: *mut LSA_TOKEN_INFORMATION_TYPE,
     tokeninformation: *mut *mut c_void,
@@ -118,7 +120,7 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     _primarycredentials: *mut SECPKG_PRIMARY_CRED,
     _supplementalcredentials: *mut *mut SECPKG_SUPPLEMENTAL_CRED_ARRAY,
 ) -> NTSTATUS {
-    if protocolsubmitbuffer.is_null() {
+    if protocolsubmitbuffer.is_null() || clientrequest.is_null() || logonid.is_null() || substatus.is_null() {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -162,14 +164,52 @@ unsafe extern "system" fn lsa_logon_user_ex2(
         return status;
     }
 
-    if !substatus.is_null() {
-        unsafe {
-            *substatus = STATUS_NOT_IMPLEMENTED.0;
-        }
+    let Ok(resolved_account) =
+        resolve_account_sid(&verified_logon.domain, &verified_logon.username)
+    else {
+        return STATUS_INVALID_PARAMETER;
+    };
+
+    let status = unsafe { allocate_token_information_v1(lsa, &resolved_account, tokeninformation) };
+    if status != STATUS_SUCCESS {
+        return status;
     }
 
-    // The parser and LSA entry points are wired. Token construction is the next task.
-    STATUS_NOT_IMPLEMENTED
+    let status = unsafe {
+        allocate_client_profile_buffer(
+            lsa,
+            clientrequest,
+            &_profile,
+            profilebuffer,
+            profilebuffersize,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return status;
+    }
+
+    unsafe {
+        *tokeninformationtype = windows::Win32::Security::Authentication::Identity::LsaTokenInformationV1;
+    }
+
+    let mut token = windows::Win32::Foundation::HANDLE::default();
+    let status = unsafe {
+        create_token_from_v1(
+            lsa,
+            logonid,
+            logontype,
+            *tokeninformation as *const windows::Win32::Security::Authentication::Identity::LSA_TOKEN_INFORMATION_V1,
+            *accountname,
+            *authenticatingauthority,
+            &mut token,
+            substatus,
+        )
+    };
+    if status != STATUS_SUCCESS {
+        return status;
+    }
+
+    STATUS_SUCCESS
 }
 
 fn success_outputs_are_present(

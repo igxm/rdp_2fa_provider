@@ -120,7 +120,7 @@ Scheme A serialization format v1
 - [x] 实现 `LSA_TOKEN_INFORMATION_V1` 构造 helper：`lsa::token`
 - [x] 增加 LSA token 成功路径输出参数和函数表 guard
 - [x] 封装 LSA `CreateToken` 调用 wrapper：`lsa::token::create_token_from_v1`
-- [ ] 实现 LSA token 构造或对接可接受的 LSA token 创建路径
+- [x] 实现 LSA token 构造并接入 gated `LogonUserEx2` success path
 - [ ] 联调 Winlogon / LSA / Credential Provider 数据流
 
 第八阶段：方案 B（已放弃，仅保留为过渡备选）
