@@ -5,9 +5,9 @@ use windows::Win32::{
         LUID, NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_NOT_IMPLEMENTED, STATUS_SUCCESS,
     },
     Security::Authentication::Identity::{
-        LSA_DISPATCH_TABLE, LSA_STRING, LSA_TOKEN_INFORMATION_TYPE, LSA_UNICODE_STRING,
-        SECPKG_FUNCTION_TABLE, SECPKG_INTERFACE_VERSION, SECPKG_PRIMARY_CRED,
-        SECPKG_SUPPLEMENTAL_CRED_ARRAY, SECURITY_LOGON_TYPE,
+        LSA_DISPATCH_TABLE, LSA_SECPKG_FUNCTION_TABLE, LSA_STRING, LSA_TOKEN_INFORMATION_TYPE,
+        LSA_UNICODE_STRING, SECPKG_FUNCTION_TABLE, SECPKG_INTERFACE_VERSION, SECPKG_PARAMETERS,
+        SECPKG_PRIMARY_CRED, SECPKG_SUPPLEMENTAL_CRED_ARRAY, SECURITY_LOGON_TYPE,
     },
 };
 use windows_core::PSTR;
@@ -15,6 +15,7 @@ use windows_core::PSTR;
 use crate::auth::{CustomAuthSerialization, DEFAULT_AUTH_PACKAGE_NAME};
 
 static PACKAGE_TABLE: OnceLock<SECPKG_FUNCTION_TABLE> = OnceLock::new();
+static LSA_FUNCTION_TABLE: OnceLock<LSA_SECPKG_FUNCTION_TABLE> = OnceLock::new();
 
 /// Entry point used by LSA to discover this authentication package's callbacks.
 #[unsafe(no_mangle)]
@@ -31,6 +32,7 @@ pub unsafe extern "system" fn SpLsaModeInitialize(
     let table = PACKAGE_TABLE.get_or_init(|| SECPKG_FUNCTION_TABLE {
         InitializePackage: Some(lsa_initialize_package),
         LogonUserEx2: Some(lsa_logon_user_ex2),
+        Initialize: Some(sp_initialize),
         ..Default::default()
     });
 
@@ -40,6 +42,19 @@ pub unsafe extern "system" fn SpLsaModeInitialize(
         *pctables = 1;
     }
 
+    STATUS_SUCCESS
+}
+
+unsafe extern "system" fn sp_initialize(
+    _packageid: usize,
+    _parameters: *const SECPKG_PARAMETERS,
+    functiontable: *const LSA_SECPKG_FUNCTION_TABLE,
+) -> NTSTATUS {
+    if functiontable.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    let _ = LSA_FUNCTION_TABLE.set(unsafe { *functiontable });
     STATUS_SUCCESS
 }
 
@@ -104,6 +119,10 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     let payload =
         unsafe { slice::from_raw_parts(protocolsubmitbuffer as *const u8, submitbuffersize as usize) };
     if CustomAuthSerialization::from_bytes(payload).is_err() {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if LSA_FUNCTION_TABLE.get().is_none() {
         return STATUS_INVALID_PARAMETER;
     }
 
