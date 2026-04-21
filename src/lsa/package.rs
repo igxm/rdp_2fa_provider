@@ -106,12 +106,12 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     protocolsubmitbuffer: *const c_void,
     _clientbufferbase: *const c_void,
     submitbuffersize: u32,
-    _profilebuffer: *mut *mut c_void,
-    _profilebuffersize: *mut u32,
+    profilebuffer: *mut *mut c_void,
+    profilebuffersize: *mut u32,
     _logonid: *mut LUID,
     substatus: *mut i32,
-    _tokeninformationtype: *mut LSA_TOKEN_INFORMATION_TYPE,
-    _tokeninformation: *mut *mut c_void,
+    tokeninformationtype: *mut LSA_TOKEN_INFORMATION_TYPE,
+    tokeninformation: *mut *mut c_void,
     accountname: *mut *mut LSA_UNICODE_STRING,
     authenticatingauthority: *mut *mut LSA_UNICODE_STRING,
     _machinename: *mut *mut LSA_UNICODE_STRING,
@@ -119,6 +119,17 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     _supplementalcredentials: *mut *mut SECPKG_SUPPLEMENTAL_CRED_ARRAY,
 ) -> NTSTATUS {
     if protocolsubmitbuffer.is_null() {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if !success_outputs_are_present(
+        profilebuffer,
+        profilebuffersize,
+        tokeninformationtype,
+        tokeninformation,
+        accountname,
+        authenticatingauthority,
+    ) {
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -132,6 +143,9 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     let Some(lsa) = LSA_FUNCTION_TABLE.get() else {
         return STATUS_INVALID_PARAMETER;
     };
+    if !token_creation_functions_are_present(lsa) {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     let status = unsafe { allocate_lsa_unicode_string(lsa, &verified_logon.username, accountname) };
     if status != STATUS_SUCCESS {
@@ -156,4 +170,51 @@ unsafe extern "system" fn lsa_logon_user_ex2(
 
     // The parser and LSA entry points are wired. Token construction is the next task.
     STATUS_NOT_IMPLEMENTED
+}
+
+fn success_outputs_are_present(
+    profilebuffer: *mut *mut c_void,
+    profilebuffersize: *mut u32,
+    tokeninformationtype: *mut LSA_TOKEN_INFORMATION_TYPE,
+    tokeninformation: *mut *mut c_void,
+    accountname: *mut *mut LSA_UNICODE_STRING,
+    authenticatingauthority: *mut *mut LSA_UNICODE_STRING,
+) -> bool {
+    !profilebuffer.is_null()
+        && !profilebuffersize.is_null()
+        && !tokeninformationtype.is_null()
+        && !tokeninformation.is_null()
+        && !accountname.is_null()
+        && !authenticatingauthority.is_null()
+}
+
+fn token_creation_functions_are_present(lsa: &LSA_SECPKG_FUNCTION_TABLE) -> bool {
+    lsa.AllocateLsaHeap.is_some()
+        && lsa.AllocateClientBuffer.is_some()
+        && lsa.CopyToClientBuffer.is_some()
+        && lsa.CreateToken.is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_missing_success_outputs() {
+        assert!(!success_outputs_are_present(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ));
+    }
+
+    #[test]
+    fn rejects_function_table_without_create_token() {
+        let lsa = LSA_SECPKG_FUNCTION_TABLE::default();
+
+        assert!(!token_creation_functions_are_present(&lsa));
+    }
 }

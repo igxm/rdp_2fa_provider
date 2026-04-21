@@ -118,6 +118,7 @@ Scheme A serialization format v1
 - [x] 实现 LSA heap Unicode string 分配 helper，并接入 account/audit string 输出
 - [x] 实现 Windows account SID 解析 helper：`lsa::account`
 - [x] 实现 `LSA_TOKEN_INFORMATION_V1` 构造 helper：`lsa::token`
+- [x] 增加 LSA token 成功路径输出参数和函数表 guard
 - [ ] 实现 LSA token 构造或对接可接受的 LSA token 创建路径
 - [ ] 联调 Winlogon / LSA / Credential Provider 数据流
 
