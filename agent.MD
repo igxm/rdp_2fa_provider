@@ -135,10 +135,11 @@ Scheme A serialization format v1
 - [x] 修正 CLSID 与注册配置一致性
 - [x] 增加 LSA Authentication Package 注册脚本
 - [x] 增加 LSA Authentication Package 回滚脚本
+- [x] 增加 VM 注册状态预检脚本：`scripts/test_vm_registration_state.ps1`
 - [ ] 在虚拟机中进行注册与登录测试
 - [ ] 验证 Windows 10/11 x64 兼容性
 - [ ] 补齐异常场景测试
-- [ ] 梳理发布/安装/回滚操作手册
+- [x] 梳理发布/安装/回滚操作手册：`docs/vm_validation_checklist.md`
 
 当前执行顺序
 1. 完成第七阶段 LSA token/profile 构造策略设计。
@@ -153,3 +154,4 @@ Scheme A serialization format v1
 - [x] 2026-04-21：完成 LSA 包入口骨架、payload 解析和 auth 核心校验委托。
 - [x] 2026-04-21：完成代码分层整理：认证协议在 `auth::package`，LSA 桥接在 `lsa::package`。
 - [x] 2026-04-21：完成 LSA 注册/回滚脚本。
+- [x] 2026-04-21：完成 VM 注册状态预检脚本和安装/回滚验证清单。
