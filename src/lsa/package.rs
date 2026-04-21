@@ -14,7 +14,10 @@ use windows_core::PSTR;
 
 use crate::{
     auth::{verify_custom_auth_payload, DEFAULT_AUTH_PACKAGE_NAME},
-    lsa::profile::build_profile_buffer,
+    lsa::{
+        memory::allocate_lsa_unicode_string,
+        profile::build_profile_buffer,
+    },
 };
 
 static PACKAGE_TABLE: OnceLock<SECPKG_FUNCTION_TABLE> = OnceLock::new();
@@ -109,8 +112,8 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     substatus: *mut i32,
     _tokeninformationtype: *mut LSA_TOKEN_INFORMATION_TYPE,
     _tokeninformation: *mut *mut c_void,
-    _accountname: *mut *mut LSA_UNICODE_STRING,
-    _authenticatingauthority: *mut *mut LSA_UNICODE_STRING,
+    accountname: *mut *mut LSA_UNICODE_STRING,
+    authenticatingauthority: *mut *mut LSA_UNICODE_STRING,
     _machinename: *mut *mut LSA_UNICODE_STRING,
     _primarycredentials: *mut SECPKG_PRIMARY_CRED,
     _supplementalcredentials: *mut *mut SECPKG_SUPPLEMENTAL_CRED_ARRAY,
@@ -126,8 +129,23 @@ unsafe extern "system" fn lsa_logon_user_ex2(
     };
     let _profile = build_profile_buffer(&verified_logon);
 
-    if LSA_FUNCTION_TABLE.get().is_none() {
+    let Some(lsa) = LSA_FUNCTION_TABLE.get() else {
         return STATUS_INVALID_PARAMETER;
+    };
+
+    let status = unsafe { allocate_lsa_unicode_string(lsa, &verified_logon.username, accountname) };
+    if status != STATUS_SUCCESS {
+        return status;
+    }
+
+    let authority = if verified_logon.domain.trim().is_empty() || verified_logon.domain == "." {
+        DEFAULT_AUTH_PACKAGE_NAME
+    } else {
+        &verified_logon.domain
+    };
+    let status = unsafe { allocate_lsa_unicode_string(lsa, authority, authenticatingauthority) };
+    if status != STATUS_SUCCESS {
+        return status;
     }
 
     if !substatus.is_null() {

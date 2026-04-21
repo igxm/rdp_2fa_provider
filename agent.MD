@@ -115,6 +115,7 @@ Scheme A serialization format v1
 - [x] LSA payload 校验委托给 `auth::verification`
 - [x] 设计 LSA token/profile 构造策略：`docs/lsa_token_profile_strategy.md`
 - [x] 实现 LSA profile buffer 构造：`lsa::profile`
+- [x] 实现 LSA heap Unicode string 分配 helper，并接入 account/audit string 输出
 - [ ] 实现 LSA token 构造或对接可接受的 LSA token 创建路径
 - [ ] 联调 Winlogon / LSA / Credential Provider 数据流
 
