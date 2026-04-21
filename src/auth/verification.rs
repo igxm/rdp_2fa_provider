@@ -79,4 +79,50 @@ mod tests {
 
         assert_eq!(error, AuthVerificationError::MissingSecondaryPassword);
     }
+
+    #[test]
+    fn rejects_missing_username() {
+        let payload = CustomAuthSerialization {
+            mode: AuthMode::SmsCode,
+            username: "   ".to_string(),
+            domain: ".".to_string(),
+            sms_code: MOCK_SMS_CODE.to_string(),
+            secondary_password: String::new(),
+        }
+        .to_bytes();
+
+        let error = verify_custom_auth_payload(&payload).unwrap_err();
+
+        assert_eq!(error, AuthVerificationError::MissingUsername);
+    }
+
+    #[test]
+    fn rejects_invalid_sms_code() {
+        let payload = CustomAuthSerialization {
+            mode: AuthMode::SmsCode,
+            username: "alice".to_string(),
+            domain: ".".to_string(),
+            sms_code: "000000".to_string(),
+            secondary_password: String::new(),
+        }
+        .to_bytes();
+
+        let error = verify_custom_auth_payload(&payload).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AuthVerificationError::SmsCodeInvalid(message)
+                if message.contains("验证码错误") && message.contains(MOCK_SMS_CODE)
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_payload() {
+        let error = verify_custom_auth_payload(b"not-rdp2fa").unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthVerificationError::InvalidPayload(CustomAuthSerializationError::InvalidMagic)
+        );
+    }
 }

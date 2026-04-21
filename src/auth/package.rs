@@ -44,13 +44,19 @@ impl CustomAuthSerialization {
             tag => return Err(CustomAuthSerializationError::UnsupportedMode(tag)),
         };
 
-        Ok(Self {
+        let submission = Self {
             mode,
             username: cursor.read_utf16_field()?,
             domain: cursor.read_utf16_field()?,
             sms_code: cursor.read_utf16_field()?,
             secondary_password: cursor.read_utf16_field()?,
-        })
+        };
+
+        if !cursor.is_done() {
+            return Err(CustomAuthSerializationError::TrailingBytes);
+        }
+
+        Ok(submission)
     }
 }
 
@@ -61,6 +67,7 @@ pub enum CustomAuthSerializationError {
     UnsupportedVersion(u16),
     UnsupportedMode(u16),
     InvalidUtf16,
+    TrailingBytes,
 }
 
 fn mode_tag(mode: AuthMode) -> u16 {
@@ -125,6 +132,10 @@ impl<'a> Cursor<'a> {
 
         String::from_utf16(&utf16).map_err(|_| CustomAuthSerializationError::InvalidUtf16)
     }
+
+    fn is_done(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
 }
 
 #[cfg(test)]
@@ -163,5 +174,79 @@ mod tests {
         let actual = CustomAuthSerialization::from_bytes(&expected.to_bytes()).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rejects_invalid_magic() {
+        let mut payload = CustomAuthSerialization {
+            mode: AuthMode::SmsCode,
+            username: "alice".to_string(),
+            domain: ".".to_string(),
+            sms_code: "123456".to_string(),
+            secondary_password: String::new(),
+        }
+        .to_bytes();
+        payload[0] = b'X';
+
+        let error = CustomAuthSerialization::from_bytes(&payload).unwrap_err();
+
+        assert_eq!(error, CustomAuthSerializationError::InvalidMagic);
+    }
+
+    #[test]
+    fn rejects_unsupported_mode() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(SERIALIZATION_MAGIC);
+        payload.extend_from_slice(&SERIALIZATION_VERSION.to_le_bytes());
+        payload.extend_from_slice(&99u16.to_le_bytes());
+
+        let error = CustomAuthSerialization::from_bytes(&payload).unwrap_err();
+
+        assert_eq!(error, CustomAuthSerializationError::UnsupportedMode(99));
+    }
+
+    #[test]
+    fn rejects_truncated_utf16_field() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(SERIALIZATION_MAGIC);
+        payload.extend_from_slice(&SERIALIZATION_VERSION.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&2u32.to_le_bytes());
+        payload.extend_from_slice(&b'a'.to_le_bytes());
+
+        let error = CustomAuthSerialization::from_bytes(&payload).unwrap_err();
+
+        assert_eq!(error, CustomAuthSerializationError::Truncated);
+    }
+
+    #[test]
+    fn rejects_invalid_utf16() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(SERIALIZATION_MAGIC);
+        payload.extend_from_slice(&SERIALIZATION_VERSION.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(&0xD800u16.to_le_bytes());
+
+        let error = CustomAuthSerialization::from_bytes(&payload).unwrap_err();
+
+        assert_eq!(error, CustomAuthSerializationError::InvalidUtf16);
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let mut payload = CustomAuthSerialization {
+            mode: AuthMode::SmsCode,
+            username: "alice".to_string(),
+            domain: ".".to_string(),
+            sms_code: "123456".to_string(),
+            secondary_password: String::new(),
+        }
+        .to_bytes();
+        payload.push(0);
+
+        let error = CustomAuthSerialization::from_bytes(&payload).unwrap_err();
+
+        assert_eq!(error, CustomAuthSerializationError::TrailingBytes);
     }
 }
