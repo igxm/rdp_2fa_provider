@@ -1,14 +1,15 @@
 use std::ffi::c_void;
 
 use windows::Win32::{
-    Foundation::{NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_NO_MEMORY, STATUS_SUCCESS},
+    Foundation::{HANDLE, LUID, NTSTATUS, STATUS_INVALID_PARAMETER, STATUS_NO_MEMORY, STATUS_SUCCESS},
     Security::{
         CreateWellKnownSid, PSID, SID_AND_ATTRIBUTES, TOKEN_DEFAULT_DACL, TOKEN_GROUPS,
-        TOKEN_OWNER, TOKEN_PRIMARY_GROUP, TOKEN_USER, WinAuthenticatedUserSid, WinBuiltinUsersSid,
-        WinWorldSid, SECURITY_MAX_SID_SIZE,
+        TOKEN_OWNER, TOKEN_PRIMARY_GROUP, TOKEN_SOURCE, TOKEN_USER, WinAuthenticatedUserSid,
+        WinBuiltinUsersSid, WinWorldSid, SECURITY_MAX_SID_SIZE, SecurityImpersonation,
     },
     Security::Authentication::Identity::{
-        LSA_SECPKG_FUNCTION_TABLE, LSA_TOKEN_INFORMATION_V1,
+        LSA_SECPKG_FUNCTION_TABLE, LSA_TOKEN_INFORMATION_V1, LSA_UNICODE_STRING,
+        LsaTokenInformationV1, SECURITY_LOGON_TYPE,
     },
     System::SystemServices::{
         SE_GROUP_ENABLED, SE_GROUP_ENABLED_BY_DEFAULT, SE_GROUP_MANDATORY,
@@ -19,6 +20,50 @@ use crate::lsa::account::ResolvedAccount;
 
 const DEFAULT_GROUP_ATTRIBUTES: u32 =
     (SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED) as u32;
+
+pub unsafe fn create_token_from_v1(
+    lsa: &LSA_SECPKG_FUNCTION_TABLE,
+    logon_id: *const LUID,
+    logon_type: SECURITY_LOGON_TYPE,
+    token_information: *const LSA_TOKEN_INFORMATION_V1,
+    account_name: *const LSA_UNICODE_STRING,
+    authority_name: *const LSA_UNICODE_STRING,
+    token: *mut HANDLE,
+    substatus: *mut i32,
+) -> NTSTATUS {
+    if logon_id.is_null()
+        || token_information.is_null()
+        || account_name.is_null()
+        || authority_name.is_null()
+        || token.is_null()
+        || substatus.is_null()
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    let Some(create_token) = lsa.CreateToken else {
+        return STATUS_INVALID_PARAMETER;
+    };
+
+    let source = token_source_for_package();
+    unsafe {
+        create_token(
+            logon_id,
+            &source,
+            logon_type,
+            SecurityImpersonation,
+            LsaTokenInformationV1,
+            token_information as *const c_void,
+            std::ptr::null(),
+            account_name,
+            authority_name,
+            std::ptr::null(),
+            std::ptr::null(),
+            token,
+            substatus,
+        )
+    }
+}
 
 pub unsafe fn allocate_token_information_v1(
     lsa: &LSA_SECPKG_FUNCTION_TABLE,
@@ -80,6 +125,22 @@ pub unsafe fn allocate_token_information_v1(
     }
 
     STATUS_SUCCESS
+}
+
+fn token_source_for_package() -> TOKEN_SOURCE {
+    TOKEN_SOURCE {
+        SourceName: [
+            b'R' as i8,
+            b'D' as i8,
+            b'P' as i8,
+            b'2' as i8,
+            b'F' as i8,
+            b'A' as i8,
+            0,
+            0,
+        ],
+        SourceIdentifier: LUID::default(),
+    }
 }
 
 unsafe fn allocate_token_groups(
@@ -167,5 +228,12 @@ mod tests {
         assert_eq!(DEFAULT_GROUP_ATTRIBUTES & SE_GROUP_MANDATORY as u32, 1);
         assert_eq!(DEFAULT_GROUP_ATTRIBUTES & SE_GROUP_ENABLED_BY_DEFAULT as u32, 2);
         assert_eq!(DEFAULT_GROUP_ATTRIBUTES & SE_GROUP_ENABLED as u32, 4);
+    }
+
+    #[test]
+    fn token_source_name_is_stable() {
+        let source = token_source_for_package();
+
+        assert_eq!(source.SourceName, [82, 68, 80, 50, 70, 65, 0, 0]);
     }
 }
