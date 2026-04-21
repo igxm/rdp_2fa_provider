@@ -30,7 +30,7 @@ pub mod CSampleCredential;
 pub mod CPipeListener;
 pub mod Pipe;
 pub mod auth;
-pub mod lsa_package;
+pub mod lsa;
 pub mod ui_model;
 
 use CSampleProvider::SampleProvider;
